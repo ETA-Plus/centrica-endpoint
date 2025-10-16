@@ -51,11 +51,17 @@ def handle_data():
     validated_measurements = []
     for i, item in enumerate(data["measurements"]):
         required_fields = {
-            "site_name": str,
-            "energy(Wh)": (int, float),
+            "device_id": (int,),
+            "device_name": (str,),
+            "measurement_time(UTC)": (str,),
+            "resolution(minutes)": (int,),
+            "site_id": (int,),
+            "site_name": (str,),
             "current(A)": (int, float),
             "voltage(V)": (int, float),
-            "power(W)": (int, float)
+            "power(W)": (int, float),
+            "power_factor": (int, float),
+            "energy(Wh)": (int, float)
         }
 
         validated = {}
@@ -83,3 +89,4 @@ if __name__ == "__main__":
     import os
     port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
+
