@@ -35,6 +35,19 @@ def _interval_is_finalized(measurement_time, resolution_minutes, now):
 
     return start + timedelta(minutes=minutes) <= now
 
+
+def _is_all_zero(measurement):
+    """Return True if the record is a fully-zeroed dropout block.
+
+    Panoramic Power emits placeholder records with every measured field at 0
+    (voltage/current/power/power_factor) for intervals it hasn't settled yet;
+    it later overwrites them with the real values. A genuinely idle but
+    energized device still reads its line voltage (~230), so this only matches
+    the spurious dropout blocks, not real off-periods.
+    """
+    return (measurement.get("voltage") == 0 and measurement.get("power") == 0
+            and measurement.get("current") == 0 and measurement.get("power_factor") == 0)
+
 @app.route('/')
 def index():
     return "Server is up and running", 200
@@ -108,23 +121,23 @@ def handle_data():
 
         validated_measurements.append(validated)
 
-    # Time-guard: only store records whose interval has finalized. Forming
-    # buckets (which the export may send as all-zero) are skipped until they
-    # close, so the importer picks up the finalized value on a later poll.
-    # Purely time-based — a finalized real value, including a genuine 0, is
-    # always kept. The POST response still echoes the full received payload.
+    # Only store trustworthy records: skip not-yet-finalized (forming) buckets
+    # and fully-zeroed dropout blocks that the export sends before it settles a
+    # value. A genuinely idle device keeps its line voltage, so real off-periods
+    # are preserved. The POST response still echoes the full received payload.
     now_utc = datetime.now(timezone.utc)
-    finalized_measurements = [
+    kept_measurements = [
         m for m in validated_measurements
         if _interval_is_finalized(m.get("measurement_time"), m.get("resolution"), now_utc)
+        and not _is_all_zero(m)
     ]
-    dropped = len(validated_measurements) - len(finalized_measurements)
+    dropped = len(validated_measurements) - len(kept_measurements)
     if dropped:
-        print(f"Time-guard: skipped {dropped} not-yet-finalized measurement(s)")
+        print(f"Skipped {dropped} not-yet-finalized or all-zero measurement(s)")
 
-    # Store the latest finalized measurements
-    last_received_data = finalized_measurements
-    print(f"Data stored: {finalized_measurements}")
+    # Store the latest kept measurements
+    last_received_data = kept_measurements
+    print(f"Data stored: {kept_measurements}")
 
     return jsonify({"message": "Measurements received", "data": validated_measurements}), 200
 
