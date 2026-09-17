@@ -1,10 +1,39 @@
 from flask import Flask, request, jsonify
+from datetime import datetime, timedelta, timezone
 import json
 
 app = Flask(__name__)
 
 # Store the last received data in memory
 last_received_data = []
+
+
+def _interval_is_finalized(measurement_time, resolution_minutes, now):
+    """Return True if the record's interval has fully elapsed relative to `now` (UTC).
+
+    Centrica labels each record by the START of its `resolution`-minute bucket.
+    A bucket [t, t + resolution) is only trustworthy once it has closed; before
+    that, the export may send an all-zero / partial "forming" bucket. We keep a
+    record only when its bucket has closed. Fail-open: if the timestamp can't be
+    parsed we keep the record rather than risk dropping real data.
+    """
+    try:
+        raw = measurement_time.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        start = datetime.fromisoformat(raw)
+    except (ValueError, AttributeError, TypeError):
+        return True
+
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=timezone.utc)
+
+    try:
+        minutes = int(resolution_minutes)
+    except (TypeError, ValueError):
+        minutes = 15
+
+    return start + timedelta(minutes=minutes) <= now
 
 @app.route('/')
 def index():
@@ -79,9 +108,23 @@ def handle_data():
 
         validated_measurements.append(validated)
 
-    # Store the latest received measurements
-    last_received_data = validated_measurements
-    print(f"Data received: {validated_measurements}")
+    # Time-guard: only store records whose interval has finalized. Forming
+    # buckets (which the export may send as all-zero) are skipped until they
+    # close, so the importer picks up the finalized value on a later poll.
+    # Purely time-based — a finalized real value, including a genuine 0, is
+    # always kept. The POST response still echoes the full received payload.
+    now_utc = datetime.now(timezone.utc)
+    finalized_measurements = [
+        m for m in validated_measurements
+        if _interval_is_finalized(m.get("measurement_time"), m.get("resolution"), now_utc)
+    ]
+    dropped = len(validated_measurements) - len(finalized_measurements)
+    if dropped:
+        print(f"Time-guard: skipped {dropped} not-yet-finalized measurement(s)")
+
+    # Store the latest finalized measurements
+    last_received_data = finalized_measurements
+    print(f"Data stored: {finalized_measurements}")
 
     return jsonify({"message": "Measurements received", "data": validated_measurements}), 200
 
